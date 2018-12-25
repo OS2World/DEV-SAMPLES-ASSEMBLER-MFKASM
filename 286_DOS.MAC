@@ -1,0 +1,1543 @@
+;------------------------------------------------------
+;286_dos.mac Begun:Fri  05-15-1992   Revised:Sun  06-28-1992
+;M. F. Kaplon
+;Macros using the DOSxxxx calls of OS/2 2.0 .286 library
+;This Library uses the PASCAL convention so that
+;parameters are pushed in order and stack pointer reset by callee.
+;All Macro Names begin with $ and are followed in all
+;cases of a DOS.... call with the name of the call
+;All system calls in 16 bit code are FAR in OS/2 independent of model
+;------------------------------------------------------
+
+;---------------------- EXTRN definitions ------------------------
+EXTRN      DosAllocSeg:far,DosBeep:far,DosDevIOCtl:far,DosExecPgm:far
+EXTRN      DosFreeSeg:far,DosExit:far,DosCreateThread:far,DosSetPrty:far
+EXTRN      DosGetDateTime:far,DosGetEnv:far,DosGetInfoSeg:far
+EXTRN      DosOpen:far,DosRead:far,DosSleep:far,DosWrite:far,DosShutdown:far
+EXTRN      DosMonClose:far,DosMonOpen:far,DosMonRead:far,DosMonReg:far,DosMonWrite:far
+
+EXTRN      KbdCharIn:far,KbdFlushBuffer:far,KbdGetStatus:far,KbdSetStatus:far
+EXTRN      KbdStringIn:far
+
+EXTRN      VioGetBuf:far,VioShowBuf:far
+EXTRN      VioGetConfig:far,VioGetCurPos:far,VioGetMode:far,VioReadCellStr:far
+EXTRN      VioReadCharStr:far,VioScrollDn:far,VioSetCurPos:far,VioSetMode:far
+EXTRN      VioWrtCellStr:far,VioWrtCharStr:far,VioWrtCharStrAtt:far,VioWrtNAttr:far
+EXTRN      VioWrtNCell:far,VioWrtNChar:far,VioWrtTTY:far
+EXTRN     VioGetPhysBuf:far,VioScrLock:far,VioSetAnsi:far
+
+EXTRN      WinInitialize:far,WinTerminate:far,WinQuerySwitchList:far
+EXTRN      WinChangeSwitchEntry:far  ;,Win16ChangeSwitchEntry:far
+
+;-------------------- Macro Type equates --------------------
+
+$ClearScreen   equ   $VioWrtNCell " ",FGDflt,BGDflt,4000,0,0  ;Clear The Screen with Current Attributes
+$NewLine       equ   $DosWriteMsg  nl    ;Just What It Says
+$Wait          equ   $PopMsg -1,-1,"Press Esc or CR to Return",HRed,HWhite
+;-------------------- Structures -------------------
+
+DateTime        STRUCT      ;structure for DateTime Info
+    Hour        BYTE   ?    ;0-23
+    Minute      BYTE   ?    ;0-59
+    Second      BYTE   ?    ;0-59
+    Hundrs      BYTE   ?    ;0-99 hundredths of a second
+    Day         BYTE   ?    ;1-31
+    Month       BYTE   ?    ;1-12
+    Year        WORD   ?    ;1980-2079
+    TimeZone    WORD   ?    ;TimeZone(minutesñ GMT, 300 = US EST,-1=undefined)
+    DayofWeek   BYTE   ?    ;0=Sunday,1=Monday, etc.
+DateTime        ENDS
+
+KbdDataIn       STRUCT      ;structure for KbdCharIn and KbdPeek
+    Char        BYTE   ?
+    Scan        BYTE   ?
+    Status      BYTE   ?    ;Bits defined p 574 Duncan
+    Rsvd        BYTE   0
+    Shift       WORD   ?    ;Keyboard Shift State   Bits defined p 574 Duncan
+    Time        DWORD  ?    ;msec since system turned on/restarted
+KbdDataIn       ENDS
+
+KbdStatus       STRUCT    2 ;structure for KbdGetStatus,KbdSetStatus
+    BufSize     WORD   10   ;10 in vs. 1.1,1.2,1.3, 2.0
+    KBStateMask WORD   0    ;defined p576 Duncan
+    TurnArndCh  WORD   0
+    IntFlags    WORD   0    ;defined p576 Duncan
+    ShiftState  WORD   0    ;defined p576 Duncan
+KbdStatus       ENDS
+
+KbdMonPacket    STRUCT      ;structure for Kbd Monitor Data Packet
+    MonFlags     BYTE   ?
+    OrigScanCode BYTE   ?
+    TransltdChar BYTE   ?
+    TransltdSC   BYTE   ?
+    DBCSStatus   BYTE   ?
+    DBCSShift    BYTE   ?
+    ShiftState   WORD   ?   ;Same definsitions as KbdCharIn
+    TimeStamp    DWORD  ?
+    KBDriverFlag WORD   ?
+KbdMonPacket     ENDS
+
+VioConfigStat   STRUCT      ;structure for Get Config
+    BufSize     WORD   10
+    Adapter     WORD   ?    ;defined on p/599 of Duncan
+    Display     WORD   ?    ;defined on p/599 of Duncan
+    VideoMem    DWORD  ?    ;Bytes of Memory on Video Adapter
+VioConfigStat   ENDS
+
+VioModeStat     STRUCT      ;status of Video Mode
+    BufSize     WORD   14   ;Size of buffer
+    ModeType    BYTE   ?    ;p. 602/614 of Duncan for definitions
+    Colors      BYTE   ?    ;p. 602/614 of Duncan for definitions
+    TextCols    WORD   ?    ;# Text Columns
+    TextRows    WORD   ?    ;# Text Rows
+    HorPixels   WORD   ?    ;# Horizontal Resolution in Pixels
+    VerPixels   WORD   ?    ;# Vertical Resolution in Pixels
+    Reserved    WORD   0    ; Reserved
+VioModeStat     ENDS
+
+;------ General Macros -------
+
+$CLS  MACRO     ;clear screen with DosWrite
+    local c0
+    mov         cx,24
+    c0:
+                $DosWriteMsg nl
+    loop        c0
+ENDM
+
+$DefineNumBufs  MACRO    ;Define Buffers used for Storage for Num conversion
+    B_Buf       BYTE  3 dup(?)
+    W_Buf       BYTE  5 dup(?)
+    DW_Buf      BYTE 10 dup(0)
+    Bit8Str     BYTE  8 dup(?)
+    Bit16Str    BYTE  16 dup(?)
+ENDM
+
+$DefineDosBufs MACRO    ;Define Buffers used by Dosroutines
+    nwritten    WORD  ?           ;forr those  programs requiring ptr to # written
+    ReadBuf     BYTE  5 dup(?)
+ENDM
+
+$DefineKbdBufs MACRO    ;Define Buffers used for Kbd Routines
+    KbdData      KbdDataIn  {,,,,,}
+    KbdStatusCur KbdStatus  {10,0,0,0,0}  ;need size of buffer
+    Key          WORD  ?
+    ShftState    WORD  ?
+    KBStatus     WORD  ?
+    ShiftState   WORD  ?
+ENDM
+
+$DefineVioBufs MACRO     ;Define Buffers used by VIO routines
+    attrib      BYTE  ?           ;used by $Attrib
+ENDM
+
+$DefineWinBufs  MACRO    ;Define Buffers used for WIN routines
+    hab         WORD  ?           ;wininitialize
+    numitems    WORD  ?
+ENDM
+
+$Attrib MACRO  FG,BG     ;Requires DefineVioBufs
+    mov   al,BG
+    shl   al,4           ;move into upper 4 bits
+    add   al,FG
+    mov   attrib,al
+ENDM
+
+$BufLength MACRO  BufAdr  ;returns length of ASCII0 String at BufAdr in AX
+    push    si
+    push    bx
+    xor     bx,bx
+    mov     si,BufAdr
+    .WHILE  byte ptr [si+bx] != 0
+            inc     bx
+    .ENDW
+    mov    ax,bx
+    pop    bx
+    pop    si
+ENDM
+
+; Display at current row + 1 Err_Num " Error Calling DOS Function FuncName"
+$DosErrMsg  MACRO  FuncName   ;FuncName passed in calling macros
+    $WordToAscii ax
+    $NewLine
+    $NewLine
+    $DosWriteMsgAT W_Buf
+    $DosWriteMsg <" Error calling Dos CP Function ",FuncName>
+    $DosBeep  500,500
+ENDM
+
+; Gets Key Code formatted as a WORD = HIgh Byte:Scan Code,LowByte:CharCode
+; Code returned in variable Key
+; Returns Shift Status in ShftState
+$GetKey  MACRO
+    pusha
+    $KbdCharIn
+    mov     ah,KbdData.Scan
+    mov     al,KbdData.Char
+    mov     Key,ax
+    mov     ax,KbdData.Shift
+    mov     ShftState,ax
+    popa
+ENDM
+
+$GetKBStatus  MACRO
+     $KbdGetStatus
+     mov   ax,KbdStatusCur.KBStateMask
+     mov   KBStatus,ax
+     mov   ax,KbdStatusCur.ShiftState
+     mov   ShiftState,ax
+ENDM
+
+;Displays Message in a double line Box Anchored at row,col with Text
+;centered in the Box. If row/col = -1 Box is centered vertically/horizontally
+;Saves and Restores Underlying Screen
+;for simplicity save and restore a rectangle 3 rows high and 80 cols wide
+;to a dedicated memory location
+$PopMsg  MACRO  row,col,Msg,FG,BG
+    local  MsgName,lnth
+    .DATA
+         MsgName   BYTE  " ",Msg," "  ;spaces between Left/Right Vertical
+    IFNDEF  scol0
+         srow      WORD   ?      ;storage for row and col
+         srow0     WORD   ?      ;init row
+         srowe     WORD   ?      ;endrow
+         scol      WORD   ?
+         scol0     WORD   ?      ;storage for Center Col
+         LocBufSz  WORD   ?      ;ptr for storage for underlying screen
+    ENDIF
+    .CODE
+    pusha
+    mov   ax,LENGTHOF MsgName
+    .IF  ax > 76
+        lnth = 76
+    .ELSE
+        lnth = LENGTHOF MsgName
+    .ENDIF
+    mov   ax,row            ;in case row/col are defined in terms
+    mov   srow,ax           ;of memory variables
+    mov   ax,col
+    mov   scol,ax
+    .IF  srow == -1         ;Center Vertically
+          mov   srow,11
+    .ENDIF
+    .IF   srow > 22
+          mov   srow,22
+    .ENDIF
+    mov   bx,srow
+    mov   srow0,bx          ;Save for restore screen
+    add   bx,3
+    mov   srowe,bx
+    $ScreenSave srow0,0,srowe,79,LocBufSz
+     mov    ax,col          ;need for case col not centered
+     mov    scol0,ax
+    .IF scol == -1          ;Center Horizontally
+        mov   scol,80
+        sub   scol,lnth
+        shr   scol,1        ;divide by 2
+        mov   ax,scol
+        mov   scol0,ax
+    .ENDIF
+    $VioWrtNCell BoxCharUL,FG,BG,1,srow,scol
+    inc   scol
+    $VioWrtNCell BoxCharH,FG,BG,lnth,srow,scol
+    add   scol,lnth
+    $VioWrtNCell BoxCharUR,FG,BG,1,srow,scol   ;Write Upper Right Character
+    inc   srow
+    $VioWrtNCell BoxCharV,FG,BG,1,srow,scol    ;Write Right End Vert Char
+    mov   ax,scol0
+    mov   scol,ax                              ;Back to orig col
+    $VioWrtNCell BoxCharV,FG,BG,1,srow,scol    ;Write Left Side Vert Char
+    inc   srow                                 ;Bottom row
+    $VioWrtNCell BoxCharLL,FG,BG,1,srow,scol   ;Write Lower Left Anchor character
+    inc   scol
+    $VioWrtNCell BoxCharH,FG,BG,lnth,srow,scol ;Write Bottom Box Horiz Char
+    add   scol,lnth
+    $VioWrtNCell BoxCharLR,FG,BG,1,srow,scol   ;Write Lower Right Character
+    dec   srow
+    mov   ax,scol0
+    mov   scol,ax
+    inc   scol
+    $VioWrtCharStrAtt MsgName,srow,scol,FG,BG
+    .WHILE 1
+        $DosBeep 500,500
+        $GetKey
+;        $KbdCharIn        ;pause
+        .IF Key == K_ESC  ; KbdData.Char == 27           ;Esc
+             .BREAK
+        .ENDIF
+        .IF KEY == K_ENTER  ;KbdData.Char == 13           ;CR
+             .BREAK
+        .ENDIF
+    .ENDW
+    $ScreenRest srow0 ,0,srowe,79,LocBufSz
+    popa
+ENDM
+
+$Printf0 MACRO  typ,prm  ;typ : b/w/s = BYTE/WORD/STRING whose value is val
+    local    msgname     ;bb/bw/ = 8bitstring,16bitstring representation of #
+    IFIDNI  <typ>,<x>    ;default - nothing entered - exit
+        EXITM
+    ENDIF
+    IFIDNI  <typ>,<b>    ;b/w/ followed by b/h is in Binary/Hex representation
+         $ByteToAscii prm  ;converts to Ascii
+         $DosWriteMsgAT B_Buf  ;TTY write at current cursor
+        EXITM
+    ENDIF
+    IFIDNI  <typ>,<w>
+        $WordToAscii prm     ;converts to Ascii in W_Buf
+        $DosWriteMsgAT W_Buf   ;TTY write at current cursor
+        EXITM
+    ENDIF
+    IFIDNI  <typ>,<dw>
+        mov  ax,word ptr [prm]
+        mov  dx,word ptr [prm+2]
+        $DWordToAscii
+        $DosWriteMsgAT DW_Buf
+        EXITM
+    ENDIF
+    IFIDNI  <typ> ,<bb>
+        mov   al,prm
+        $ByteToBitString
+        $DosWriteMsgAT  Bit8Str
+        EXITM
+    ENDIF
+    IFIDNI  <typ>, <wb>
+        mov   ax,prm
+        $WordToBitString
+        $DosWriteMsgAT  Bit16Str
+        EXITM
+    ENDIF
+    IFIDNI  <typ>, <s>
+    .DATA
+    msgname  BYTE   prm
+    .CODE
+    push     stdout
+    push     ds
+    push     offset msgname
+    push     LENGTHOF msgname
+    push     ds
+    push     offset nwritten
+    call     DosWrite
+        EXITM
+    ENDIF
+ENDM
+
+$Printf MACRO  t1,p1,t2:=<x>,p2,t3:=<x>,p3,t4:=<x>,p4,t5:=<x>,p5,t6:=<x>,p6,t7:=<x>,p7
+    $Printf0  t1,p1
+    $Printf0  t2,p2
+    $Printf0  t3,p3
+    $Printf0  t4,p4
+    $Printf0  t5,p5
+    $Printf0  t6,p6
+    $Printf0  t7,p7
+ENDM
+
+$ResetByteBuffer MACRO  Buffer, Bvar           ;reset a BYTE buffer to Bvar
+    local   b0
+    push    si
+    mov     cx,LENGTHOF Buffer
+    mov     si,offset Buffer
+b0: mov     byte ptr [si],Bvar
+    inc     si
+    loop    b0
+    pop     si
+ENDM
+
+$ResetWordBuffer MACRO  Buffer, Wvar   ;reset a WORD buffer to Wvar
+    local   b0
+    push    si
+    mov     cx,LENGTHOF Buffer         ;returns number of elements of WORDS
+    mov     si,offset Buffer
+b0: mov     word ptr [si],Wvar
+    add     si,2                       ;scale for WORD array
+    loop    b0
+    pop     si
+ENDM
+
+;---- Restores Rectangular Area on Screen ------
+;---- Buffer is Handle to Buffer assigned by DosAllocSeg
+;---- Have to write out row by row
+$ScreenRest  MACRO top,left,bottom,right,Buffer
+    local  b0
+    mov    cx,bottom
+    sub    cx,top
+    inc    cx               ;number of rows to copy
+    mov    bx,right
+    sub    bx,left
+    inc    bx               ;length of a line
+    shl    bx,1             ;allow for char-attr pairs
+    xor    dx,dx            ; ax gets changed at each call
+    mov    si,top
+b0: push   Buffer           ;ds of Memory Block
+    push   dx               ;offset into block
+    push   bx               ;length of line
+    push   si               ;row
+    push   left             ;start column - is fixed
+    push   0                ;default Video Handle
+    call   VioWrtCellStr
+    inc    si               ;next row
+    add    dx,bx            ;increment offset
+    loop   b0
+ENDM
+
+;----- To save a rectangular block read a series of lines into the block
+;----- A handle to the memory block is passed to the function and is
+;----- assigned by the call - that handle is used to release the block
+$ScreenSave  MACRO top,left,bottom,right,Buffer  ;Buffer is PTR WORD handle
+    local  b0
+    .DATA
+    IFNDEF Llnth
+           Llnth  WORD   ?      ;for  LIne Length storage
+    ENDIF
+    .CODE
+    mov    ax,right  ; calculate length from start-end coordinates
+    sub    ax,left
+    inc    ax               ;al has number of columns
+    mov    bx,bottom
+    sub    bx,top
+    inc    bx               ;bl has number of rows
+    mul    bx               ;rows * cols = ax
+    shl    ax,1             ; x 2 for byte-attr pair
+;----- now alloc memory block of size in ax -----
+    push   ax               ;size of memory block
+    push   ds
+    push   offset Buffer    ;receive selector
+    push   0000000000000000b;Sharing OPtion
+    call   DosAllocSeg      ;memory ds = Buffer and Offset = 0
+;----- now save screen block to allocated memory segment
+    mov    cx,bottom
+    sub    cx,top
+    inc    cx               ;number of rows to copy
+    mov    Llnth,right
+    sub    Llnth,left
+    inc    Llnth            ;length of a line
+    shl    Llnth,1          ;allow for char-attr pairs
+    mov    bx,Llnth
+    xor    dx,dx            ;ax gets changed
+    mov    si,top
+b0: push   Buffer           ;selector of allocated segment
+    push   dx               ;offset
+    push   ds               ;offset of Llnth
+    push   offset Llnth     ;line length
+    push   si               ;row - changes
+    push   left             ;column - remains same
+    push   0                ;default video handle
+    call   VioReadCellStr
+    inc    si               ;next row
+    add    dx,bx            ;new offset into buffer
+    mov    Llnth,bx         ;reset length
+    loop   b0
+ENDM
+
+$SetColor  MACRO FG,BG            ;uses ANSI sequences
+    .DATA
+    IFNDEF color_code
+       color_code BYTE 01bh,'[!FGm',01bh,'[!BGm'
+       _written   WORD  ?
+    ENDIF
+    .CODE
+;    $DosWrite _written,LENGTHOF color_code,offset color_code,stdout
+    push   ds
+    push   offset color_code
+    push   LENGTHOF color_code
+    push   0
+    call   VioWrtTTY
+ENDM
+
+$String MACRO  id,string  ;enters a string into DATA
+    .DATA
+    IFNDEF  id
+       id  BYTE string
+    ENDIF
+    .CODE
+ENDM
+;----- DOS Calls or directly related DOS -------
+
+; Sound the bell
+$DosBeep  MACRO  beepd,beepf
+    push    beepf     ;frequency in Hz
+    push    beepd     ;duration in milliseconds frequency in Hz
+    call    DosBeep
+ENDM
+; If use Proto route do not need the EXTERN definition works OK
+; DosBeep Proto far Pascal var1:WORD,var2:WORD
+; Call as Invoke DosBeep,500,500  for instance
+
+;pdataarea and pparmlist are set up so that if NULL pointer just enter 0, otherwise enter offset name when passing
+$DosDevIOCtl MACRO get_func_data,func_parms,funcnum,funccateg,handle
+    push     ds
+    push     offset get_func_data
+    push     ds
+    push     offset func_parms
+    push     funcnum
+    push     funccateg
+    push     handle
+    call     DosDevIOCtl
+    .IF ax != 0
+       $DosErrMsg  "DosDevIOCtl"
+       $DosExit
+    .ENDIF
+ENDM
+
+$DosExecPgm  MACRO  ExecMode,Args,ChildExec
+     .Data
+     IFNDEF ObjName
+         ObjName  BYTE  64 dup(0)  ;receives name of dynlink causing failure
+     ENDIF
+     IFNDEF RetCode
+         RetCode  DWORD  ?
+     ENDIF
+     .CODE
+     push   ds
+     push   offset ObjName
+     push   LENGTHOF ObjName
+     push   ExecMode
+     push   ds
+     push   Offset Args
+     push   0                 ;address of environment
+     push   0                 ;inherit parents
+     push   ds
+     push   offset RetCode
+     push   ds
+     push   offset ChildExec
+     call   DosExecPgm
+    .IF ax != 0
+       $DosErrMsg  "DosExecPgm"
+       $DosExit
+    .ENDIF
+ENDM
+
+; Exit Program
+$DosExit  MACRO
+    push    1         ;terminate process (all threads) (0 = current thread)
+    push    0         ;exit result code (0 is normal exit)
+    call    DosExit
+ENDM
+
+$DosFreeSeg MACRO  Sel
+    push    Sel
+    call    DosFreeSeg
+ENDM
+
+$DosGetDateTime  MACRO
+    .DATA
+    IFNDEF DateTimeData
+         DateTimeData  DateTime {,,,,,,,,}
+    ENDIF
+    .CODE
+    push    ds
+    push    offset DateTimeData
+    call    DosGetDateTime
+ENDM
+
+$DosGetEnv  MACRO
+    .DATA
+    IFNDEF  EnvSel
+       EnvSel  WORD    ?    ;selector for environment
+       CmdLine WORD    ?    ;Offset at end of environment
+    ENDIF
+    .CODE
+    push    ds
+    push    offset EnvSel
+    push    ds
+    push    offset CmdLine
+    call    DosGetEnv
+    .IF ax != 0
+       $DosErrMsg  "DosGetEnv"
+       $DosExit
+    .ENDIF
+ENDM
+
+$DosGetInfoSeg  MACRO
+    .DATA
+    IFNDEF  GlobalInfoSeg
+        GlobalInfoSeg  WORD  ?  ;pointer for global infoseg
+        LocalInfoSeg   WORD  ?  ;pointer to local infoseg
+    ENDIF
+    .CODE
+    push     ds
+    push     offset GlobalInfoSeg
+    push     ds
+    push     offset LocalInfoSeg
+    call     DosGetInfoSeg
+    .IF ax != 0
+       $DosErrMsg  "DosGetInfoSeg"
+       $DosExit
+    .ENDIF
+ENDM
+
+$DosMonCloseKB  MACRO
+    push   KBMonHandle
+    call   DosMonClose
+ENDM
+
+$DosMonOpenKB  MACRO ;open KB MOnitor
+    .DATA
+    IFNDEF  KBDevice
+        KBDevice     BYTE  "KBD$",0
+        KBMonHandle  WORD   0
+        CurSessNum   WORD   ?      ;needed for DosMonRegKB
+    ENDIF
+    .CODE
+    push     ds
+    push     offset KBDevice
+    push     ds
+    push     offset KBMonHandle
+    call     DosMonOpen
+    .IF ax != 0
+       $DosErrMsg  "DosMonOpenKB"
+       $DosExit
+    .ENDIF
+ENDM
+
+$DosMonReadKB  MACRO  ;call only after $DosMonOpenKB $DosMonRegKB
+     .DATA
+     IFNDEF KbdMonData
+         KbdMonData   BYTE        128;128   ;KbdMonPacket  {,,,,,,,,}
+         PacketLnth   WORD        ?
+     ENDIF
+     .CODE
+     mov     PacketLnth,128 ;PacketLnth-KbdMonData
+     push    ds
+     push    offset KBMonInBuf
+     push    0          ;wait till data is ready
+     push    ds
+     push    offset KbdMonData
+     push    ds
+     push    offset PacketLnth         ;length of DataPacket Buffer
+     call    DosMonRead
+    .IF ax != 0
+       $DosErrMsg  "DosMonReadKB"
+       $DosExit
+    .ENDIF
+ENDM
+
+$DosMonRegKB  MACRO
+    .DATA
+    IFNDEF   KBMonInBuf
+        KBMonInBuf   WORD   128,64 dup(0)   ;length is 128 bytes
+        KBMonOutBuf  WORD   128,64 dup(0)
+    ENDIF
+    .CODE                        ;from DosMonOPen
+    push     KBMonHandle         ;Monitor Must be opened first
+    push     ds
+    push     offset KBMonInBuf
+    push     ds
+    push     offset KBMonOutBuf
+    push     1                   ;Head of Chain
+    push     CurSessNum          ;session Num for Keyboard
+    call     DosMonReg
+    .IF ax != 0
+       $DosErrMsg  "DosMonRegKB"
+       $DosExit
+    .ENDIF
+ENDM
+
+$DosMonWriteKB  MACRO
+    push     ds
+    push     offset KBMonOutBuf
+    push     ds
+    push     offset KbdMonData
+    push     14; PacketLnth    ;amount actually readin
+    call     DosMonWrite
+   .IF ax != 0
+       $DosErrMsg  "DosMonWriteKB"
+       $DosExit
+    .ENDIF
+ENDM
+
+$DosMonWriteKBBack  MACRO  char,scan,timehigh,timelow
+     IFNDEF KbdMonDataBack
+         KbdMonDataBack  KbdMonPacket  {0,0,,,01000000b,0,0,,0}
+;         PacketLnth   WORD        ?
+     ENDIF
+    mov      KbdMonDataBack.TransltdChar,char
+    mov      KbdMonDataBack.TransltdSc,scan
+    mov      ax,timehigh
+    mov      word ptr KbdMonDataBack.TimeStamp,ax
+    mov      ax,timelow
+    mov      word ptr [KbdMonDataBack.TimeStamp+2],ax
+    push     ds
+    push     offset KBMonOutBuf
+    push     ds
+    push     offset KbdMonDataBack
+    push     14; PacketLnth    ;amount to go back
+    call     DosMonWrite
+   .IF ax != 0
+       $DosErrMsg  "DosMonWriteKB"
+       $DosExit
+    .ENDIF
+ENDM
+
+$DosOpen MACRO filename,handle,openaction,filealloc1,fileattrib,openflag,openmode
+    push     ds
+    push     offset filename
+    push     ds
+    push     offset handle
+    push     ds
+    push     offset openaction
+    push     word ptr [filealloc1]   ;DWORD
+    push     word ptr [filealloc1+2]
+    push     fileattrib
+    push     openflag
+    push     openmode
+    push     0      ;DWORD 0
+    push     0
+    call DosOpen
+    .IF ax != 0
+       $DosErrMsg  "DosOpen"
+       $DosExit
+    .ENDIF
+ENDM
+
+$DosRead MACRO  bytesread, numreq, address, handle
+    push     handle
+    push     ds
+    push     address
+    push     numreq
+    push     ds
+    push     offset bytesread
+    call     DosRead
+ENDM
+
+$DosReadKB MACRO  numreq
+    push     stdin
+    push     ds
+    push     offset Read_Buf     ;defined in DefineDosBufs
+    push     numreq
+    push     ds
+    push     offset nwritten
+    call     DosRead
+ENDM
+
+$DosShutdown  MACRO    ;shut down system
+    push     0
+    push     0
+    call     DosShutdown
+    .IF ax != 0
+       $DosErrMsg  "DosShutdown"
+       $DosExit
+    .ELSE
+       $Printf s"ShutDown Completed - Reboot or Turn System Off"
+    .ENDIF
+ENDM
+
+$DosSleep MACRO  THigh,TLow
+    push     Thigh
+    push     TLow
+    call     DosSleep
+ENDM
+
+$DosWrite MACRO  lenth ,address,handle
+    push     handle
+    push     ds
+    push     address
+    push     lenth
+    push     ds
+    push     offset nwritten
+    call     DosWrite
+ENDM
+
+; Write a message to console at current cursor
+$DosWriteMsg MACRO  message    ;message passed on calling line
+    local    msgname
+    .DATA
+    msgname  BYTE   message
+    .CODE
+    pusha
+    push     stdout
+    push     ds
+    push     offset msgname
+    push     LENGTHOF msgname
+    push     ds
+    push     offset nwritten
+    call     DosWrite
+    popa
+ENDM
+
+; Write to console the message stored AT location
+; ofset is the offset from start of string "location" to start writing
+; devised to get around printing leading spaces in numerical conversions
+$DosWriteMsgAT MACRO  buffer,ofset:=<0>    ;message defined in .DATA buffer
+    pusha
+    push     stdout
+    push     ds
+    mov      ax,offset buffer
+    add      ax,ofset        ;adjusted offset
+    push     ax
+    mov      ax,LENGTHOF buffer
+    sub      ax,ofset        ;modified length
+    push     ax
+    push     ds
+    push     offset nwritten
+    call     DosWrite
+    popa
+ENDM
+
+;----- KbdCalls ------
+
+$KbdCharIn  MACRO   ;Name of Buffer is KbdData - a common buffer
+    push     ds
+    push     offset KbdData   ;buffer
+    push     0                ;wait for character
+    push     0                ;Kbd Handle
+    call     KbdCharIn
+ENDM
+
+$KbdFlushBuffer  MACRO
+    push     stdin     ;default KB handle
+    call     KbdFlushBuffer
+ENDM
+
+$KbdGetStatus  MACRO ;  uses standard buffer named KbdStatusCur
+    push     ds
+    push     offset KbdStatusCur   ;status_buf
+    push     stdin       ;default KB handle
+    call     KbdGetStatus
+    .IF ax != 0
+       $DosErrMsg  "KbdGetStatus"
+       $DosExit
+    .ENDIF
+ENDM
+
+$KbdSetStatus  MACRO  ; uses standard buffer KbdStatusCur
+    push     ds
+    push     offset KbdStatusCur   ;status_buf
+    push     stdin       ;default KB handle
+    call     KbdSetStatus
+    .IF ax != 0
+       $DosErrMsg  "KbdSetStatus"
+       $DosExit
+    .ENDIF
+ENDM
+
+$KbdStringIn MACRO  str_buf,info_buf,wait_nowait
+    push     ds
+    push     offset  str_buf
+    push     ds
+    push     offset  info_buf
+    push     wait_nowait
+    push     stdin          ;default  KB handle
+    call     KbdStringIn
+ENDM
+
+;----- Vio Calls ------
+
+$VioGetConfig  MACRO
+    .DATA
+    IFNDEF  VioConfig
+         VioConfig  VioConfigStat {,,,}
+    ENDIF
+    .CODE
+    push      0
+    push      ds
+    push      offset VioConfig
+    push      0                ;default Video Handle
+    call      VioGetConfig
+ENDM
+
+$VioGetCurPos  MACRO  row:=<c_row>,col:=<c_col>   ;values returned in variables c_row,c_col
+    .DATA
+    IFNDEF row
+         row    WORD   ?
+    ENDIF
+    IFNDEF col
+         col    WORD   ?
+    ENDIF
+    .CODE
+    push     ds
+    push     offset row
+    push     ds
+    push     offset col
+    push     0            ;video handle
+    call     VioGetCurPos
+ENDM
+
+$VioGetBuf  MACRO  ;get handle to logical video buffer
+   .DATA
+   IFNDEF    LVB        ;[LVB] is offset ,[LVB+2] is Selector
+       LVB   DWORD  ?   ;Pointer to Logical Video Buffer offset:ds
+       LVB_S WORD   ?   ;Size of LVB in BYTES
+   ENDIF
+   .CODE
+   push      ds
+   push      offset LVB
+   push      ds
+   push      offset LVB_S
+   push      0          ;Default Video Handle
+   call      VioGetBuf
+    .IF ax != 0
+       $DosErrMsg  "VioGetBuf"
+       $DosExit
+    .ENDIF
+ENDM
+
+$VioShowBuf MACRO  ;StartPos,Length ;called only if $VioGetBuf called first
+    push     word ptr [LVB]   ;offset into LVB
+    push     LVB_S            ;size of LVB
+    push     0                ;default Video Handle
+    call     VioShowBuf
+    .IF ax != 0
+       $DosErrMsg  "VioShowBuf"
+       $DosExit
+    .ENDIF
+ENDM
+
+;$VioReadCellStrLVB  MACRO  Buffer,BufLength,row,col
+;    .DATA
+;    IFNDEF   ScreenSize
+;       ScreenSize  WORD   ?
+;    ENDIF
+;    .CODE
+;    mov      ScreenSize,BufLength
+;    push     ds
+;    push     offset Buffer
+;    push     ds
+;    push     Offset ScreenSize
+;    push     row
+;    push     col
+;    push     0        ;default video handle
+;    call     VioReadCellStr
+;ENDM
+
+$VioWrtNAttrLVB   MACRO  FG,BG,replicate
+    local    r0
+    pusha
+    $Attrib  &FG,&BG
+    mov      di,word ptr [LVB]     ;offset set before resetting ds
+    push     es             ;save current segment
+    mov      ax, word ptr [LVB+2] ;assign LVB DS
+    mov      es,ax
+    inc      di             ;point to attribute
+    mov      cx,replicate
+    mov      al,attrib
+r0: mov      byte ptr es:[di],al
+    add      di,2
+    loop     r0
+    pop      es             ;get ds back
+    $VioShowBuf
+    popa
+ENDM
+
+$VioWrtCharStrLVB  MACRO  message,row,col
+    local    msg,d0
+    .DATA
+        msg  BYTE  message
+    .CODE
+    pusha
+    push     es                      ;save es
+    mov      ax,word ptr [LVB+2]     ;segment of Logical Buffer
+    mov      es,ax
+    mov      di,word ptr [LVB]       ;offset of  Logical buffer
+    mov      ax,row
+    mov      bl,160                  ;160 bytes per row
+    mul      bl
+    add      di,ax                   ;offset for row
+    add      di,col                  ;need 2*80 to allow for attribute byte
+    add      di,col                  ;offset for column
+    mov      si,offset msg
+    mov      cx,LENGTHOF msg
+d0: mov      al,byte ptr ds:[si]
+    mov      es:[di],al
+    inc      si
+    add      di,2                    ;better than 2 inc
+    loop     d0
+    pop      es                      ;get back es
+    $VioShowBuf                      ;update Physical Buf
+    popa
+ENDM
+
+$VioWrtCharStrAttrLVB  MACRO  message,row,col,FG,BG
+    local    msg0,d0
+    $Attrib  &FG,&BG
+    .DATA
+        msg0  BYTE  message
+    .CODE
+    pusha
+    push     es                      ;save es
+    mov      ax,word ptr [LVB+2]     ;segment of Logical Buffer
+    mov      es,ax
+    mov      di,word ptr [LVB]       ;offset of  Logical buffer
+    mov      ax,row
+    mov      bl,160                  ;160 bytes per row
+    mul      bl
+    add      di,ax                   ;offset for row
+    add      di,col                  ;2*col bytes   column offset
+    add      di,col                  ;offset for column
+    mov      si,offset msg0
+    mov      cx,LENGTHOF msg0
+    mov      ah,Attrib
+d0: mov      al,byte ptr ds:[si]
+    mov      es:[di],ax
+    inc      si
+    add      di,2
+    loop     d0
+    pop      es                      ;get back es
+    $VioShowBuf                      ;update Physical Buf
+    popa
+ENDM
+
+
+$VioGetMode   MACRO
+    .DATA
+    IFNDEF  VioMode
+         VioMode  VioModeStat {,,,,,,,}
+    ENDIF
+    .CODE
+    push     ds
+    push     offset VioMode
+    push     0          ;default video handle
+    call     VioGetMode
+ENDM
+
+$VioReadCellStr  MACRO  Buffer,BufLength,row,col
+    .DATA
+    IFNDEF   ScreenSize
+       ScreenSize  WORD   ?
+    ENDIF
+    .CODE
+    mov      ScreenSize,BufLength
+    push     ds
+    push     offset Buffer
+    push     ds
+    push     Offset ScreenSize
+    push     row
+    push     col
+    push     0        ;default video handle
+    call     VioReadCellStr
+ENDM
+
+$VioReadCharStr  MACRO  Buffer,BufLength,row,col
+    .DATA
+    IFNDEF   ScreenSize
+       ScreenSize  WORD   ?
+    ENDIF
+    .CODE
+    mov      ScreenSize,BufLength
+    push     ds
+    push     offset Buffer
+    push     ds
+    push     ScreenSize
+    push     row
+    push     col
+    push     0        ;default video handle
+    call     VioReadCellStr
+ENDM
+
+$VioSetCurPos  MACRO  row,col
+    push     row
+    push     col
+    push     0     ;video handle 0 = default
+    call     VioSetCurPos
+ENDM
+
+$VioSetMode MACRO
+    .DATA
+    IFNDEF  VioMode
+         VioMode  VioModeStat  {14,00000001b,4,80,25,?,?,0}
+    ENDIF
+    .CODE
+    push    ds
+    push    offset VioMode
+    push    0         ;Default Video Handle
+    call    VioSetMode
+;    .IF ax != 0    ;for some crazy reason this gives ERR message
+;       $DosErrMsg  "VioSetMode"
+;       $DosExit
+;    .ENDIF
+ENDM
+
+$VioWrtCellStr MACRO  buffer,Length,row,col
+    push     ds
+    push     offset buffer
+    push     Length
+    push     row
+    push     col
+    push     0                ;default video handle
+    call     VioWrtCellStr
+ENDM
+
+$VioWrtCharStr   MACRO   buffer,row,col   ;buffer defined in .DATA
+    push     ds
+    push     offset buffer
+    push     LENGTHOF buffer
+    push     row
+    push     col
+    push     0                 ;video handle 0 = default
+    call     VioWrtCharStr
+ENDM
+
+$VioWrtCharStrAtt   MACRO   buffer,row,col,FG,BG   ;buffer defined in .DATA
+    $Attrib  &FG,&BG
+    push     ds
+    push     offset buffer
+    push     LENGTHOF buffer
+    push     row
+    push     col
+    push     ds
+    push     offset Attrib
+    push     0                 ;video handle 0 = default
+    call     VioWrtCharStrAttr
+ENDM
+
+$VioWrtNAttr   MACRO  FG,BG,replicate,row,col
+    $Attrib  &FG,&BG
+    push     ds
+    push     offset attrib
+    push     replicate
+    push     row
+    push     col
+    push     0                 ;video handle 0 = default
+    call     VioWrtNAttr
+ENDM
+
+$VioWrtCharStrAtt MACRO  buffer,row,col,FG,BG
+    $Attrib  FG,BG
+    push     ds
+    push     offset buffer
+    push     LENGTHOF buffer
+    push     row
+    push     col
+    push     ds
+    push     offset attrib
+    push     0                ;default video handle
+    call     VioWrtCharStrAtt
+ENDM
+
+$VioWrtNCell   MACRO  char,FG,BG,replicate,row,col
+    $Attrib &FG,&BG
+    .DATA
+    IFNDEF   char_attr
+         char_attr WORD  ?
+    ENDIF
+    .CODE
+    pusha
+    mov      al,char
+    mov      ah,Attrib
+    mov      char_attr,ax
+    push     ds
+    push     offset char_attr
+    push     replicate
+    push     row
+    push     col
+    push     0                 ;video handle 0 = default
+    call     VioWrtNCell
+    popa
+ENDM
+
+$VioWrtNChar MACRO wchar,replicate,row,col
+    .DATA
+    IFNDEF   nchar
+        nchar  BYTE  ?
+    ENDIF
+    .CODE
+    pusha
+    mov      al,wchar
+    mov      nchar,al
+    push     ds
+    push     offset nchar
+    push     replicate
+    push     row
+    push     col
+    push     0
+    call     VioWrtNChar
+    popa
+ENDM
+
+$VioWrtTTY   MACRO   message   ;pass message on calling line
+    local    msgname
+    .DATA
+    msgname  BYTE   message
+    .CODE
+    push     ds
+    push     offset msgname
+    push     LENGTHOF msgname
+    push     0                 ;video handle 0 = default
+    call     VioWrtTTY
+ENDM
+
+$VioWrtTTYAttr   MACRO   message,FG:=<FGDflt>,BG:=<BGDflt>   ;pass message on calling line
+    local    msgname
+    .DATA
+    msgname  BYTE   message
+    .CODE
+    pusha
+    $VioGetCurPos row0,col0
+    push     ds
+    push     offset msgname
+    push     LENGTHOF msgname
+    push     0                 ;video handle 0 = default
+    call     VioWrtTTY
+    $VioGetCurPos row1,col1
+    mov      ax,row1
+    sub      ax,row0
+    inc      ax
+    mov      bl,80
+    mul      bl
+    $VioWrtNAttr FG,BG,ax,row0,0  ; #rows * 80
+    $VioSetCurPos row1,col1
+    popa
+ENDM
+
+$VioWrtTTYAT   MACRO   message   ;message_name on calling line
+    push     ds
+    push     offset message
+    push     LENGTHOF message
+    push     0                 ;video handle 0 = default
+    call     VioWrtTTY
+ENDM
+
+$VioWrtTTYAttrAT  MACRO  message,FG:=<FGDflt>,BG:=<BGDflt>   ;message_name on calling line
+    pusha
+    $VioGetCurPos  row0,col0
+    push     ds
+    push     offset message
+    push     LENGTHOF message
+    push     0                 ;video handle 0 = default
+    call     VioWrtTTY
+    $VioGetCurPos row1,col1
+    mov      ax,row1
+    sub      ax,row0
+    inc      ax
+    mov      bl,80
+    mul      bl
+    $VioWrtNAttr FG,BG,ax,row0,0  ; #rows * 80
+    $VioSetCurPos row1,col1
+    popa
+ENDM
+
+;-------------- WIN........... Calls
+
+$WinInitialize MACRO
+    push     0
+    call     WinInitialize
+    mov      hab,ax           ;hab defined in $DefineBufs
+ENDM
+
+$WinChangeSwitchEntry  MACRO  hswitchh,hswitchl,segmt,ofset
+     push    hswitchh
+     push    hswitchl
+     push    segmt
+     push    ofset     ;offset of SWCNTRL STRUCture
+     call    WinChangeSwitchEntry
+    .IF ax != NULL
+        $DosErrMsg  "WinChangeSwitchEntry"
+        $DosExit
+    .ENDIF
+ENDM
+
+$WinQuerySwitchList  MACRO  ancblk,tseg,tasklist,listsize
+    push     numitems      ;defined in DefineWinBufs
+    push     ancblk
+    push     tseg          ;segment  for tasklist
+    push     tasklist      ;offset
+    push     listsize
+    call     WinQuerySwitchList
+    .IF ax == 0
+       $DosErrMsg  "WinQuerySwitchList"
+       $DosExit
+    .ENDIF
+    mov      numitems,ax
+ENDM
+
+$WinTerminate  MACRO
+    push     hab
+    call     WinTerminate
+ENDM
+
+
+
+;------------- Numeric to AScii and Ascii to Numeric routines --------------
+
+;Convert WORD to ASCII string at 5 BYTE buffer at W_Buf
+;Number to convert moved to AX
+$WordToAscii MACRO  num
+    pusha
+    mov      ax,num
+    mov      si,offset W_Buf
+    call     WordToAScii
+    popa
+ENDM
+
+;Convert BYTE to Binary Bit String
+;Byte to convert in AL
+$ByteToBitString MACRO
+    local  bb0,bb1,bb2
+    mov     di,offset Bit8Str
+    call    ByteToBitString
+ENDM
+
+;Byte to convert in AX
+$WordToBitString MACRO
+    mov     di,offset Bit16Str
+    call    WordToBitString
+ENDM
+
+;Convert BYTE to ASCII string at 3 BYTE buffer at B_Buf
+;Number to convert in AL and si = offset B_Buf
+$ByteToAscii MACRO  num
+    local    b0,b1,b2,b3
+    pusha
+    mov      al,num
+    mov      si,offset B_Buf
+    call     ByteToAScii
+    popa
+ENDM
+
+;convert string representing BYTE in BUFF to numeric
+;result returned in AL (contained in AX)
+$AsciiToBYTE  MACRO  Buff
+    local d0,lnth
+    lnth equ LENGTHOF Buff
+    pusha
+    mov      ax,1
+    xor      di,di
+    mov      bl,10
+    mov      si,offset Buff
+    mov      cx,lnth
+    .WHILE   byte ptr [si] == ' '  ;replace leading spaces with '0'
+             mov  byte ptr [si],'0'
+             inc  si
+    .ENDW
+    mov      si,offset Buff  ;reposition si
+    add      si,lnth-1       ;offset is lnth -1 from 0
+d0: push     ax
+    sub      byte ptr [si],30h
+    push     cx
+    xor      cx,cx
+    mov      cl,[si]
+    mul      cl        ;result in AX but DX = 0 this case
+    add      di,ax
+    pop      cx
+    pop      ax
+    mul      bl        ;10 x previous value in AX now
+    dec      si
+    loop     d0
+    mov      ax,di
+    popa
+ENDM
+
+;convert string representing WORD in BUFF to numeric
+;result returned in AX
+$AsciiToWORD  MACRO  Buff
+    local d0,lnth
+    lnth equ LENGTHOF Buff
+    pusha
+    mov      ax,1
+    xor      di,di
+    xor      dx,dx
+    mov      bx,10
+    mov      si,offset Buff
+    mov      cx,lnth
+    .WHILE   byte ptr [si] == " "  ; replace leading spaces with '0'
+             mov  byte ptr [si],"0"
+             inc  si
+    .ENDW
+    mov      si,offset Buff  ;reposition si
+    add      si,lnth-1       ;offset is lnth -1 from 0
+d0: push     ax
+    sub      byte ptr [si],30h
+    push     cx
+    xor      cx,cx
+    mov      cl,[si]
+    mul      cx        ;result in DX:AX but DX = 0 this case
+    add      di,ax
+    pop      cx
+    pop      ax
+    mul      bx        ;10 x previous value in AX now
+    dec      si
+    loop     d0
+    mov      ax,di
+    popa
+ENDM
+
+$DwordToAscii  MACRO  num   ;dx:ax has number
+    local    dw2,dw3
+    pusha
+    IFDEF   num
+       mov      dx,[num+2]
+       mov      ax,num
+    ENDIF
+    mov      si,offset DW_Buf
+    mov      bl,10             ;radix
+    call     Dword_To_Asc
+    mov      si,offset DW_Buf  ;fixup
+    mov      cx,10
+dw2:.IF  byte ptr [si] == "0"
+        mov byte ptr [si]," "
+        inc si
+     .ELSE
+        jmp  dw3
+    .ENDIF
+            loop    dw2
+dw3:.IF  cx == 0      ;all spaces
+        dec    si
+        mov    byte ptr [si],"0"
+   .ENDIF
+   popa
+ENDM
+
+;FUNC:  DWORD_TO_ASC
+;DESC:	Converts an unsigned dword to an ASCIIZ string of the given radix
+;IN:	DX;AX		unsigned dword ("dword")
+;	BL		radix of resulting ASCII string, 2-36 ("radix")
+;       si_reg           address to store resulting string ("outstr")
+;OUT:	"outstr"	ASCII digits generated from "dword", followed by
+;			   a NULL
+;-----------------------------------------------------------------------
+.CODE
+dword_to_asc    proc
+        push    bx
+        push    ax
+        push    dx
+$dw_to_asce_20:
+        push    cx
+        push    bp
+        xor     bh,bh
+        xor     bp,bp           ;set count to zero
+        cmp     bl,2            ;is radix less than 2?
+         jb     dw_to_a_800     ;  y: exit, n: cont. with routine
+dw_to_a_020:    call   div_dw   ;div unsigned dword by radix
+        push    cx              ;keep remainder
+        inc     bp              ;count number of remainders on stack
+        mov     cx,dx
+        or      cx,ax           ;is quotient zero?
+        jnz     dw_to_a_020     ;  n: loop again
+dw_to_a_030:pop     ax              ;get next remainder
+        add     al,"0"          ;convert to decimal
+        cmp     al,"9"          ;convert AL for A to Z?
+        jna     dw_to_a_050     ;  n: skip alpha conversion
+        add     al,7h           ;  y: convert to alpha
+dw_to_a_050:mov [si],al         ;write digit to end of string
+        inc     si
+        dec     bp              ;decrement count of remaining digits
+        jnz     dw_to_a_030     ;if count=0, stop; else loop again
+dw_to_a_800:    pop bp
+        pop cx
+        pop dx
+        pop ax
+        pop bx
+        ret
+dword_to_asc   endp
+
+
+;FUNC:  DIV_DW
+;DESC:	Divides an unsigned dword by an unsigned word, returning an
+;	unsigned dword result.
+;IN:	DX;AX		unsigned dword dividend
+;	BX		unsigned word divisor
+;OUT:	DX;AX		unsigned dword quotient
+;	CX		unsigned word remainder
+;-----------------------------------------------------------------------
+.CODE
+div_dw       proc
+        or      bx,bx           ;trying to divide by zero?
+        jz      div_dw_090      ;  y: can't do it, quit
+        xor     cx,cx
+        cmp     dx,bx           ;is a divide overflow possible?
+        jb      div_dw_070      ;  n: only need to divide once
+        xchg    ax,cx           ;DX;AX = 0;high word
+        xchg    ax,dx           ;CX = low word
+        div     bx              ;divide 0;high word by divisor
+        xchg    ax,cx           ;DX;AX = rem of high divide;low word
+div_dw_070:div  bx              ;CX = high word of quotient
+        xchg    dx,cx           ;return DX;AX = quotient, CX = rem
+div_dw_090:	ret
+div_dw  endp
+
+.CODE
+WordToBitString  proc  ;called with di set to offset of string
+    mov     cx,16
+    dec     di
+wb0:inc     di
+    shl     ax,1             ;move most significant bit to carry flag
+    jc      wb1              ;if set copy '1'
+    mov     byte ptr [di],'0'       ;else copy '0'
+    jmp     wb2
+wb1:mov     byte ptr [di],'1'
+wb2:loop    wb0
+    ret
+WordToBitString endp
+
+.CODE
+ByteToBitString  proc
+    mov     cx,8             ;called with di set to offset of string
+    dec     di
+bb0:inc     di
+    shl     al,1             ;move most significant bit to carry flag
+    jc      bb1              ;if set copy '1'
+    mov     byte ptr [di],'0'       ;else copy '0'
+    jmp     bb2
+bb1:mov     byte ptr [di],'1'
+bb2:loop    bb0
+    ret
+ByteToBitString  endp
+
+ByteToAscii   proc
+    xor      ah,ah
+    mov      dx,10
+    xor      bx,bx
+    mov      cx,3
+b0: div      dl
+    mov      bl,ah        ;get remainnder
+    add      bl,30h
+    push     bx           ;save on stack
+    xor      ah,ah        ;prepare for next division
+    loop     b0           ;on exit top of stack has first digit, etc.
+    mov      cx,3
+    mov      si,offset B_Buf
+b1: pop      ax
+    mov      [si],al
+    inc      si
+    loop     b1
+    ; now get rid of leading 0's
+    sub      si,3         ;back to start of string
+    mov      cx,3
+b2: .IF  byte ptr [si] == "0"
+        mov byte ptr [si]," "
+        inc si
+     .ELSE
+        jmp  b3
+    .ENDIF
+    loop    b2
+b3: .IF  cx == 0      ;all spaces
+        dec    si
+        mov    byte ptr [si],"0"
+   .ENDIF
+   ret
+ByteToAScii  Endp
+
+;Convert WORD to ASCII string at 5 BYTE buffer at digits
+;Number to convert in AX,offset to buffer in si
+   .CODE
+WordToAscii  proc
+    mov      di,10
+    xor      dx,dx
+    mov      cx,5
+w0: div      di
+    add      dx,30h
+    push     dx           ;save on stack
+    xor      dx,dx
+    loop     w0           ;on exit top of stack has first digit, etc.
+    mov      cx,5
+w1: pop      dx
+    mov      [si],dl
+    inc      si
+    loop     w1
+    ; now get rid of leading 0's
+     sub      si,5         ;back to start of string
+     mov      cx,5
+ w2: .IF  byte ptr [si] == "0"
+         mov byte ptr [si]," "
+         inc si
+      .ELSE
+         jmp  w3
+     .ENDIF
+     loop    w2
+w3: .IF  cx == 0      ;all spaces
+         dec    si
+         mov    byte ptr [si],"0"
+    .ENDIF
+    ret
+WordToAscii   endp
+

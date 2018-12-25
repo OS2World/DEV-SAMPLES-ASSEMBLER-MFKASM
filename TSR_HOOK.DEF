@@ -1,0 +1,12 @@
+;MFK Started:Tue  07-14-1992 :Revised:Tue  07-21-1992
+LIBRARY  tsr_hook
+
+DESCRIPTION "M.F.Kaplon TSR Code"
+
+PROTMODE
+
+CODE  PRELOAD
+
+EXPORTS
+   inputhook         @1
+   journalrecordhook @2

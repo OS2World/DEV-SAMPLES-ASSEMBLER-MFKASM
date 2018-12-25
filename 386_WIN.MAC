@@ -1,0 +1,437 @@
+;------------------------------------------------------
+;386_win.mac Begun:Mon  05-04-1992  Revised:Thu  07-16-1992
+;M. F. Kaplon
+;Macros using the WINxxxx calls of OS/2 2.0
+;Since using the Library that uses C-calling convention must push
+;parameters in reverse order and reset the stack pointer.
+;All Macro Names begin with $ and are followed in all
+;cases of a WIN.... call with the name of the call
+;Each WIN call macro resets the stack pointer based on number of pushes
+;and the type of the push ( DWORDs)
+;------------------------------------------------------
+
+EXTRN     WinAlarm:near,WinBeginPaint:near,WinChangeSwitchEntry:near
+EXTRN     WinCreateMsgQueue:near,WinCreateStdWindow:near,WinDefWindowProc:near
+EXTRN     WinDestroyMsgQueue:near,WinDestroyWindow:near,WinDispatchMsg:near
+EXTRN     WinDrawText:near,WinEndPaint:near,WinFillRect:near,WinFreeErrorInfo:near
+EXTRN     WinGetCurrentTime:near,WinGetErrorInfo:near,WinGetKeyState:near
+EXTRN     WinGetMsg:near,WinGetLastError:near,WinInitialize:near,WinMessageBox:near
+EXTRN     WinOpenWindowDC:near
+EXTRN     WinQueryDesktopWindow:near,WinQuerySwitchList:near,WinQueryWindowRect:near
+EXTRN     WinRegisterClass:near,WinReleaseHook:near,WinReleasePS:near
+EXTRN     WinSetHook:near,WinTerminate:near
+
+EXTRN     GPICreatePS:near,GpiSetDrawingMode:near
+
+;-------------------------- STRUCTURES --------------------------
+
+; for information - defined in PMWIN.H
+;QMSG  STRUC
+;   qmsg_hwnd DD  ?     ;handle of queue
+;   qmsg_msg  DD  ?     ;message ID e.g. WM_PAINT, etc
+;   qmsg_mp1  DD  ?     ;DWORD value
+;   qmsg_mp2  DD  ?     ;DWORD value
+;   qmsg_time DD  ?     ;time message generated
+;   qmsg_ptl  DB  SIZE POINTL DUP (?)   ;pointer position whe msg generated
+;   qmsg_reserved DD  ?
+;QMSG  ENDS
+
+; for information - defined in   os2def.inc
+;RECTL  STRUC   ;structure for WinFillRect
+;   rcl_xLeft   DD  ?
+;   rcl_yBottom DD  ?
+;   rcl_xRight  DD  ?
+;   rcl_yTop    DD  ?
+;RECTL  ENDS
+
+;ERRINFO STRUC
+;erri_cbFixedErrInfo DD  ?
+;erri_idError  DD  ?
+;erri_cDetailLevel DD  ?
+;erri_offaoffszMsg DD  ?
+;erri_offBinaryData  DD  ?
+;ERRINFO ENDS
+
+;---------------- Switch List Structures in PMSHL.INC
+;SWCNTRL STRUC   ;size = 96                        ;OFFSET FROM 0
+;swctl_hwnd      DD      ?                              8
+;swctl_hwndIcon  DD      ?                             12
+;swctl_hprog     DD      ?                             16
+;swctl_idProcess DD      ?                             20
+;swctl_idSession DD      ?                             24
+;swctl_uchVisibility     DD      ?                     28
+;swctl_fbJump    DD      ?                             32
+;swctl_szSwtitle DB      MAXNAMEL+4 DUP (?)            36
+;swctl_bProgType DD      ?                            100
+;SWCNTRL ENDS
+
+;SWENTRY STRUC   ;size = 4 + 96                    ;    4
+;swent_hswitch   DD      ?                         ;    8
+;swent_swctl     DB      SIZE SWCNTRL DUP (?)
+;SWENTRY ENDS
+
+;SWBLOCK STRUC   ;size = 4 + (4+96)                ;
+;swblk_cswentry  DD      ?                         ;     0
+;swblk_aswentry  DB      SIZE SWENTRY * 1 DUP (?)  ;     4
+;SWBLOCK ENDS
+
+;SWL_VISIBLE     EQU     04H
+;SWL_INVISIBLE   EQU     01H
+;SWL_GRAYED      EQU     02H
+;SWL_JUMPABLE    EQU     02H
+;SWL_NOTJUMPABLE EQU     01H
+;MAXNAMEL        EQU     60
+
+;
+;------------------------- General Purpose Macros --------------------------
+
+$DefineWinBufs   MACRO    ;Define Buffers used for WIN routines
+    msgmsg        QMSG   {,,,,,,}
+    winStyle      DWORD  ?
+    defREsult     DWORD  ?   ;WinDefWindowProc  return value
+    msgResult     DWORD  ?   ;returned by WinGetMsg
+    rclUpdate     RECTL   {,,,}
+ENDM
+
+$DefineWinHandles  MACRO
+    hab           DWORD   ?           ;wininitialize
+    hmq           DWORD   ?           ;handle to process message queue
+    hwndMainFrame DWORD   0           ;handle to main frame window
+    hwndMain      DWORD   ?           ;handle to main client window
+    hDeskTop      DWORD   ?           ;handle to DeskTop
+    hps           DWORD   ?           ;presentation space handle
+ENDM
+
+;---------------------- GPI ...  Macros -------------------------
+
+$GpiCreatePS MACRO arg0,arg1,arg2,arg3
+    push     arg3         ;Options - set of or's
+    push     arg2         ;offset Presentation Page Size - default is 0,0
+    push     arg1         ;Device Context Handle
+    push     arg0         ;Anchor Block Handle
+    call     GpiCreatePS
+    add      esp,24
+ENDM
+
+$GpiSetDrawingMode  MACRO  arg1,arg2
+    push     arg2          ;drawing mode
+    push     arg1          ;presentation space handle
+    call     GpiSetDrawingMode
+    add      esp,8
+ENDM
+
+;---------------------- WIN General Purpose Macros -------------------------
+
+;OS/2 does not use HAB returned by call to WinInitialize but deduces it from
+;the calling thread. It is suggested for portrability considerations.
+
+;!!!!! Those PM calls that open a window must when linking use
+;!!!!! the /PM:PM option and not /PM:VIO option
+;!!!!! Using the /PM:PM option means all writing to screen must be
+;!!!!! done with PM functions (i.e. WinDrawText)
+
+$WinAlarm  MACRO  arg1,arg2 ;are WA_WARNING,WA_NOTE,WA_ERROR,WA_CWINALARMS
+    push     arg2          ;kind of alarm
+    push     arg1          ;Window Handle
+    call     WinAlarm
+    add      esp,8             ;restore stack pointer
+ENDM
+
+$WinErrorMessage MACRO arg      ;sound alarm and display error box
+    $DWordToAscii eax,DW_Buf
+    $Alarm
+    $ConcantS1andS2ToS3 DW_Buf,arg,Concanted
+    $WinMessageBox HWND_DESKTOP,HWND_DESKTOP,offset Concanted,NULL,0,msgBoxErrStyle
+    $WinTerminate  hab
+    $DosExit
+ENDM
+
+;---------------------- WIN..... Macros -------------------------
+
+$WinBeginPaint  MACRO  arg0,arg1,arg2
+    push     arg2                  ;address of variable to set to invalid region
+    push     arg1                  ;null handle for Presentation space
+    push     arg0                  ;client window
+    call     WinBeginPaint
+    add      esp,12             ;restore stack pointer
+ENDM
+
+$WinChangeSwitchEntry  MACRO  data,handle
+     push    data
+     push    handle
+     call    WinChangeSwitchEntry
+    .IF eax != NULL
+       IFDEF   NOWIN
+          $DosErrMsg  "WinChangeSwitchEntry"
+          $DosExit
+       ELSE
+          $WinGetLastError  hab
+          $WinErrorMessage msgWinChangeSwitchEntry
+       ENDIF
+    .ENDIF
+    add      esp,8   ;restore stack pointer
+ENDM
+
+$WinCreateMsgQueue  MACRO  arg1,arg2   ;handle returned is hmq for queue
+    pushd    arg2      ; Queue Size LONG
+    push     arg1       ;Anchor Block Handle returned by  $WinInitialize
+    call     WinCreateMsgQueue
+    add      esp,8
+ENDM
+
+$WinCreateStdWindow MACRO arg0,arg1,arg2,arg3,arg4,arg5,arg6,arg7,arg8
+    push     arg8              ;address to receive client window handle
+    push     arg7              ;(Resource)Frame Window ID
+    push     arg6              ;Resource Module Identifier
+    push     arg5              ;Client window style
+    push     arg4              ;Offset of Title Bar Text
+    push     arg3              ;Offset Client Window class name
+    push     arg2              ;address of variable holding Frame Creation Flags
+    push     arg1              ;Frame window style
+    push     arg0              ;Parent Window Handle
+    call     WinCreateStdWindow
+    add      esp,36
+ENDM
+
+$WinDefWindowProc  MACRO  arg0,arg1,arg2,arg3
+    push     arg3  ;mp2 = msgmsg.qmsg_mp2
+    push     arg2  ;mp2 = msgmsg.qmsg_mp1
+    push     arg1  ;msg = msgmsg.qmsg_msg
+    push     arg0  ;hwnd =frame window handle
+    call     WinDefWindowProc
+    add      esp,16
+ENDM
+
+$WinDestroyMsgQueue MACRO  arg
+    push     arg                 ;message que handle
+    call     WinDestroyMsgQueue
+    add      esp,4
+ENDM
+
+$WinDestroyWindow  MACRO  arg
+    push     arg
+    call     WinDestroyWindow
+    add      esp,4
+ENDM
+
+$WinDispatchMsg  MACRO   arg0,arg1
+    push     arg1     ;offset message queue structure
+    push     arg0     ;anchor block handle
+    call     WinDispatchMsg    ;eax has correct return value
+    add      esp,8
+ENDM
+
+$WinDrawText  MACRO  arg0,arg1,arg2,arg3,arg4,arg5,arg6
+    push     arg6             ;mode in which string is to be drawn
+    push     arg5             ;background_color
+    push     arg4             ;foreground_color
+    push     arg3             ;address of structure RECTL holding screen defn
+    push     arg2             ;address of msgID
+    push     arg1             ;Length of String or terminator definition
+    push     arg0             ;Presentation space handle
+    call     WinDrawText
+    add      esp,28              ;restore stack pointer
+ENDM
+
+$WinEndPaint   MACRO arg0
+    push     arg0                ;presentation space cache handle
+    call     WinEndPaint
+    add      esp,4             ;restore stack pointer
+ENDM
+
+$WinFillRect   MACRO  arg0,arg1,arg2
+    push     arg2               ;color
+    push     arg1               ;address of structure defining rectangle
+    push     arg0               ;presentation space handle
+    call     WinFillRect
+    add      esp,12            ;restore stack pointer
+ENDM
+
+$WinFreeErrorInfo  MACRO    arg
+    push     arg    ;Pointer to Error Information Block
+    call     WinFreeErrorInfo
+    add      esp,4
+ENDM
+
+$WinGetCurrentTime  MACRO  ;time in msec returned in eax
+    push     NULL          ;this is a sort of default HAB see above
+    call     WinGetCurrentTime
+    add      esp,4
+ENDM
+
+$WinGetErrorInfo  MACRO  arg
+    push     arg
+    call     WinGetErrorInfo
+    add      esp,4
+ENDM
+
+$WinGetKeyState  MACRO     lVK
+    push     ecx
+    push     edx
+    push     lVK
+    push     offset HWND_DESKTOP
+    call     WinGetKeyState
+    add      esp,8
+    pop      edx
+    pop      ecx
+ENDM
+
+$WinGetLastError MACRO arg
+    push     arg
+    call     WinGetLastError
+    add      esp,4
+ENDM
+
+$WinGetMsg  MACRO  arg0,arg1,arg2,arg3,arg4
+    push    arg4              ;last message identity
+    push    arg3              ;first message identity
+    push    arg2              ;window filter
+    push    arg1              ;message structure  defined  above
+    push    arg0              ;anchor block handle
+    call    WinGetMsg         ;REturns TRUE except if msg is WM_QUIT returns FALSE
+    add     esp,20            ;restore stack pointer
+ENDM
+
+$WinInitialize  MACRO   arg
+     pushd   arg
+     call    WinInitialize
+     add      esp,4
+ENDM
+
+$WinLoadString  MACRO  lcchMax,ulId,hmodMod
+    push     nnwritten         ;length of string returned
+    push     offset pszBuffer  ;points to buffer that received message
+    push     lcchMax           ;size of buffer
+    push     ulId              ;message identifier
+    push     hmodMod           ;module handle
+    push     hab               ;anchor block handle
+    call     WinLoadString
+    add      esp,24
+ENDM
+
+$WinMessageBox  MACRO  arg0,arg1,arg2,arg3,arg4,arg5
+    push      arg5            ;OR defines for style
+    push      arg4            ;message box ID is USHORT
+    push      arg3            ;address of message box window title
+    push      arg2            ;address of text of error message Null Terminated
+    push      arg1            ;owner of handle of window box
+    push      arg0            ;handle of parent window is HWND_DESKTOP
+    call      WinMessageBox
+    add       esp,24
+ENDM
+
+$WinOpenWindowDC  MACRO  arg
+    push     arg
+    call     WinOpenWindowDC
+    add      esp,4
+ENDM
+
+$WinQueryDeskTopWindow MACRO  arg1, arg0
+    push     arg1       ;device context = 0 for rscreen
+    push     arg0       ;anchor block handle
+    call     WinQueryDeskTopWindow
+    add      esp,8
+ENDM
+
+$WinQuerySwitchList MACRO lnth,blklist,anch_hdl,nitems
+    push     lnth
+    push     blklist
+    push     anch_hdl
+    call     WinQuerySwitchList
+   .IF eax == NULL
+       IFDEF   NOWIN
+           $DosErrMsg  <bel,nl,"WinQuerySwitchList - No Items in List",nl>
+           $DosExit
+       ELSE
+           $WinGetLastError  hab
+           $WinErrorMessage  msgWinQuerySwitchList
+       ENDIF
+    .ENDIF
+    add      esp,12   ;restore stack pointer
+    mov      nitems,eax
+ENDM
+
+$WinQueryWindowProcess  MACRO   ppid,hframe
+     push    NULL
+     push    offset ppid
+     push    hframe
+     call    WinQueryWindowProcess
+    add      esp,12   ;restore stack pointer
+    .IF eax == FALSE
+       IFDEF   NOWIN
+           $DosErrMsg  <"  WinQueryWindowProcess",nl>
+           $DosExit
+       ELSE
+           $WinGetLastError  hab
+           $WinErrorMessage  msgWinQueryWindowProcess
+       ENDIF
+    .ENDIF
+ENDM
+
+$WinQueryWindowRect MACRO  arg0,arg1
+    push     arg1       ;offset rectangle structure
+    push     arg0       ;handle for client window
+    call     WinQueryWindowRect
+    add      esp,8   ;restore stack pointer
+ENDM
+
+$WinRegisterClass  MACRO  arg0,arg1,arg2,arg3,arg4
+    pushd    arg4                ;default storage WORD
+    pushd    arg3                ;default style DWORD
+    pushd    arg2                ;address of procedure to handle messages
+    push     arg1                ;addressof Classname associated with window procedure
+    push     arg0                ;Anchor block Handle
+    call     WinRegisterClass
+    add      esp,20
+ENDM
+
+$WinReleaseHook  MACRO  arg0,arg1,arg2,arg3,arg4
+    push     arg4      ;Resource Identity
+    push     arg3      ;Address of Application Hook Procedure
+    push     arg2      ;Hook Type
+    push     arg1      ;QueueID - NULL for system hook chain
+    push     arg0      ;Anchor Block Handle
+    call     WinReleaseHook
+    add      esp,20
+    .IF eax == FALSE
+       IFDEF   NOWIN
+           $DosErrMsg  <"  WinReleaseHook Error",nl>
+           $DosExit
+       ELSE
+           $WinGetLastError  hab
+           $WinErrorMessage  msgWinReleaseHook
+       ENDIF
+    .ENDIF
+ENDM
+
+$WinReleasePS  MACRO  arg
+    push     arg
+    call     WinReleasePS
+    add      esp,4
+ENDM
+
+$WinSetHook  MACRO  arg0,arg1,arg2,arg3,arg4
+    push     arg4      ;Resource Identity
+    push     arg3      ;Address of Application Hook Procedure
+    push     arg2      ;Hook Type
+    push     arg1      ;QueueID - NULL for system hook chain
+    push     arg0      ;Anchor Block Handle
+    call     WinSetHook
+    add      esp,20
+    .IF eax == FALSE
+       IFDEF   NOWIN
+           $DosErrMsg  "  WinSetHook Error"
+           $DosExit
+       ELSE
+           $WinGetLastError  hab
+           $WinErrorMessage  msgWinSetHook
+       ENDIF
+    .ENDIF
+ENDM
+
+$WinTerminate MACRO  arg
+    push    arg
+    call    WinTerminate
+    add     esp,4
+ENDM
+
